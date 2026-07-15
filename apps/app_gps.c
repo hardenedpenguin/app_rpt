@@ -1133,11 +1133,31 @@ static int gpsd_read_line(int fd, char *buf, size_t len)
 			return (int) i;
 		}
 		if (c != '\r') {
-			buf[i++] = c;
+			if (i < len - 1) {
+				buf[i++] = c;
+			}
 		}
 	}
 
-	return 0;
+	/* Line exceeded buffer; discard remainder until newline. */
+	while (run_forever) {
+		res = read(fd, &c, 1);
+		if (res < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			return -1;
+		}
+		if (res == 0) {
+			return -1;
+		}
+		if (c == '\n') {
+			buf[i] = '\0';
+			return (int) i;
+		}
+	}
+
+	return -1;
 }
 
 /*!
@@ -1221,7 +1241,7 @@ static void gpsd_handle_tpv(const char *line)
  */
 static void *gpsd_reader(void *data)
 {
-	char buf[512];
+	char buf[2048];
 	int fd = -1;
 	struct pollfd fds[1];
 
