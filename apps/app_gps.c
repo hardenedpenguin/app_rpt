@@ -1084,7 +1084,7 @@ static void gps_position_update(float lat, float lon, float elev_m)
 	char elevation[25];
 	time_t now_mono = time_monotonic();
 
-	snprintf(elevation, sizeof(elevation), "%.2fM", elev_m);
+	snprintf(elevation, sizeof(elevation), "%.1fM", elev_m);
 
 	ast_mutex_lock(&position_update_lock);
 	current_gps_position.is_valid = 1;
@@ -1192,6 +1192,11 @@ static int gpsd_open(void)
 	wrote = write(fd, watchcmd, sizeof(watchcmd) - 1);
 	if (wrote < 0) {
 		ast_log(LOG_WARNING, "Cannot enable gpsd JSON watch on %s:%d: %s\n", gpsd_host, gpsd_port, strerror(errno));
+		close(fd);
+		return -1;
+	}
+	if (wrote != (ssize_t) (sizeof(watchcmd) - 1)) {
+		ast_log(LOG_WARNING, "Incomplete gpsd JSON watch on %s:%d\n", gpsd_host, gpsd_port);
 		close(fd);
 		return -1;
 	}
@@ -2046,8 +2051,6 @@ static int unload_module(void)
 	}
 	if (gpsd_sockfd != -1) {
 		shutdown(gpsd_sockfd, SHUT_RDWR);
-		close(gpsd_sockfd);
-		gpsd_sockfd = -1;
 	}
 	ast_debug(2, "Waiting for aprs_connection_thread to exit\n");
 	pthread_join(aprs_connection_thread_id, NULL);
