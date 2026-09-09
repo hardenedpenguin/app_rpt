@@ -29,6 +29,26 @@ int altlink1(struct rpt *myrpt, struct rpt_link *mylink);
 
 void rpt_qwrite(struct rpt_link *l, struct ast_frame *f);
 
+/*!
+ * \brief Stop reconnect retries after an intentional disconnect.
+ * \param l Link to demote and mark disconnected
+ * \param disced Disconnect flavor (RPT_LINK_DISCONNECT or _SILENT)
+ *
+ * Demotes permanent links off MAX_RETRIES_PERM, marks retries exhausted,
+ * clears perma, sets disced, and softhangups the link channel.
+ * Do not call while holding a channel lock.
+ */
+void rpt_link_stop_retries_common(struct rpt_link *l, enum rpt_link_disconnect disced);
+
+#define rpt_link_stop_retries(l) rpt_link_stop_retries_common((l), RPT_LINK_DISCONNECT)
+#define rpt_link_stop_retries_silent(l) rpt_link_stop_retries_common((l), RPT_LINK_DISCONNECT_SILENT)
+
+/*!
+ * \brief Queue !!DISCONNECT!! on the link textq for the link thread to flush.
+ * \param l Link whose textq receives DISCSTR (safe from other threads)
+ */
+void rpt_link_queue_disconnect(struct rpt_link *l);
+
 int linkcount(struct rpt *myrpt);
 
 /*! \brief Considers repeater received RSSI and all voter link RSSI information and set values in myrpt structure. */
