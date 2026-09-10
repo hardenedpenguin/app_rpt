@@ -224,9 +224,17 @@ void rpt_link_stop_retries_common(struct rpt_link *l, enum rpt_link_disconnect d
 	rpt_link_demote_retries(l);
 	l->disced = disced;
 	/*
-	 * Do not softhangup here. Queued !!DISCONNECT!! (and other textq frames) must
-	 * be written by the link thread before the channel is hung up (#1236).
+	 * Do not softhangup here. For RPT_LINK_DISCONNECT the link thread flushes
+	 * textq (incl. !!DISCONNECT!!), arms/waits disctime for the peer to drop,
+	 * and only force-hangs up if still up after expiry (#1236 / #1218).
 	 */
+	if (disced == RPT_LINK_DISCONNECT && !l->disctime) {
+		if ((l->name[0] <= '0') || (l->name[0] > '9') || l->isremote) {
+			l->disctime = 1;
+		} else {
+			l->disctime = DISC_TIME;
+		}
+	}
 }
 
 void rpt_link_queue_disconnect(struct rpt_link *l)

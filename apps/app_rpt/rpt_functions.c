@@ -183,8 +183,9 @@ enum rpt_function_response function_ilink(struct rpt *myrpt, char *param, char *
 		}
 		ast_copy_string(myrpt->lastlinknode, digitbuf, sizeof(myrpt->lastlinknode));
 		/*
-		 * Queue !!DISCONNECT!! for the link thread, then demote/disced.
-		 * The link thread flushes textq before softhangup (#1236 / #932).
+		 * Queue !!DISCONNECT!! for the link thread, then demote/disced and arm
+		 * disctime. Link thread flushes textq, waits for the peer, force-hangs
+		 * up only after disctime if still connected (#1236 / #1218).
 		 */
 		if (l->chan && l->thisconnected) {
 			rpt_link_queue_disconnect(l);
