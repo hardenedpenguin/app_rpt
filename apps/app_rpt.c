@@ -1913,9 +1913,9 @@ static void handle_link_data(struct rpt *myrpt, struct rpt_link *mylink, char *s
 	ast_debug(5, "Received text over link: '%s'\n", str);
 
 	if (!strcmp(str, DISCSTR)) {
-		/* Peer asked us to drop this link; demote permalinks so #574 infinite
-		 * retry cannot resurrect it. Arms disctime; link thread waits for peer
-		 * hangup / expiry before teardown (#1236 / #1218).
+		/* Peer asked us to drop this link. Demote permalinks, but do not arm
+		 * disctime — the receiver must close promptly so a peer that is waiting
+		 * its own grace window is not stuck until both timers expire (#1236).
 		 */
 		rpt_link_stop_retries(mylink);
 		return;
@@ -3622,11 +3622,12 @@ static inline int periodic_process_link(struct rpt *myrpt, struct rpt_link *l, c
 	update_timer(&l->retrytimer, elap, 0);
 
 	/*
-	 * Intentional disconnect (#1218): after !!DISCONNECT!! was flushed via textq,
-	 * wait for the peer to drop during disctime. Force softhangup only if still up.
+	 * Force hangup when disced is set and disctime is not running:
+	 * - received !!DISCONNECT!! never arms grace, so this closes promptly;
+	 * - a local initiator only reaches here after the armed grace expires.
 	 */
 	if (l->disced == RPT_LINK_DISCONNECT && !l->disctime && l->chan && !ast_check_hangup(l->chan)) {
-		ast_debug(1, "disctime expired on %s, forcing hangup\n", l->name);
+		ast_debug(1, "disconnect on %s: hanging up (grace not running)\n", l->name);
 		ast_softhangup(l->chan, AST_SOFTHANGUP_DEV);
 	}
 
@@ -4695,10 +4696,20 @@ static int remote_hangup_helper(struct rpt *myrpt, struct rpt_link *l)
 	}
 
 	/*
-	 * Inbound: park on disctime (unexpected, or intentional after DISCSTR/stop_retries
-	 * armed it) so periodic LINKDISC AA runs on expiry. Do not finish early on disced.
+	 * Inbound unexpected loss parks on disctime. A local initiator that already
+	 * armed grace keeps that timer (do not start a second one). Received DISCSTR
+	 * or a grace timer that already expired must not be rearmed.
 	 */
 	if (!l->outbound) {
+		if (l->disced == RPT_LINK_DISCONNECT && l->disctime) {
+			hangup_link_chan(l);
+			return 1;
+		}
+		if (l->disced != RPT_LINK_DISCONNECT_NONE && !l->disctime) {
+			hangup_link_chan(l);
+			inbound_link_finished(myrpt, l);
+			return 0;
+		}
 		if (!l->disctime) {
 			if ((l->name[0] <= '0') || (l->name[0] > '9') || l->isremote) {
 				l->disctime = 1;
@@ -4710,10 +4721,14 @@ static int remote_hangup_helper(struct rpt *myrpt, struct rpt_link *l)
 		return 1;
 	}
 
-	/* Intentional outbound disconnect: do not redial; wait for disctime expiry. */
-	if (l->disced == RPT_LINK_DISCONNECT) {
+	/* Local outbound disconnect: do not redial; wait out armed grace. */
+	if (l->disced == RPT_LINK_DISCONNECT && l->disctime) {
 		hangup_link_chan(l);
 		return 1;
+	}
+	if (l->disced == RPT_LINK_DISCONNECT) {
+		hangup_link_chan(l);
+		return 0;
 	}
 	if (l->disced == RPT_LINK_DISCONNECT_SILENT) {
 		hangup_link_chan(l);

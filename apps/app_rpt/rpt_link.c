@@ -224,16 +224,21 @@ void rpt_link_stop_retries_common(struct rpt_link *l, enum rpt_link_disconnect d
 	rpt_link_demote_retries(l);
 	l->disced = disced;
 	/*
-	 * Do not softhangup here. For RPT_LINK_DISCONNECT the link thread flushes
-	 * textq (incl. !!DISCONNECT!!), arms/waits disctime for the peer to drop,
-	 * and only force-hangs up if still up after expiry (#1236 / #1218).
+	 * Do not softhangup and do not arm disctime here. A received !!DISCONNECT!!
+	 * must close promptly. Only a local initiator arms grace (see
+	 * rpt_link_arm_disconnect_grace) so two updated peers cannot wait on each other.
 	 */
-	if (disced == RPT_LINK_DISCONNECT && !l->disctime) {
-		if ((l->name[0] <= '0') || (l->name[0] > '9') || l->isremote) {
-			l->disctime = 1;
-		} else {
-			l->disctime = DISC_TIME;
-		}
+}
+
+void rpt_link_arm_disconnect_grace(struct rpt_link *l)
+{
+	if (l->disctime) {
+		return;
+	}
+	if ((l->name[0] <= '0') || (l->name[0] > '9') || l->isremote) {
+		l->disctime = 1;
+	} else {
+		l->disctime = DISC_TIME;
 	}
 }
 
