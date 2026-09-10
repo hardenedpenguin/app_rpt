@@ -125,9 +125,15 @@ static void check_tlink_list(struct rpt *myrpt)
 void rpt_link_destroy(void *obj)
 {
 	struct rpt_link *doomed_link = obj;
+	struct ast_frame *f;
+
 	if (doomed_link->linklist) {
 		ast_free(doomed_link->linklist);
 		doomed_link->linklist = NULL;
+	}
+	/* Refcount is zero; no other thread holds this link. */
+	while ((f = AST_LIST_REMOVE_HEAD(&doomed_link->textq, frame_list))) {
+		ast_frfree(f);
 	}
 }
 
@@ -199,15 +205,19 @@ void rpt_qwrite(struct rpt_link *l, struct ast_frame *f)
 {
 	struct ast_frame *f1;
 
-	if (!l->chan) {
-		return;
-	}
 	f1 = ast_frdup(f);
 	if (!f1) {
 		return;
 	}
 	memset(&f1->frame_list, 0, sizeof(f1->frame_list));
+	ao2_lock(l);
+	if (!l->chan) {
+		ao2_unlock(l);
+		ast_frfree(f1);
+		return;
+	}
 	AST_LIST_INSERT_TAIL(&l->textq, f1, frame_list);
+	ao2_unlock(l);
 }
 
 static void rpt_link_demote_retries(struct rpt_link *l)
@@ -295,7 +305,7 @@ void do_dtmf_phone(struct rpt *myrpt, struct rpt_link *mylink, char c)
 	struct rpt_link *l;
 	struct ao2_iterator l_it;
 
-	/* go thru all the links */
+	/* Queue for each phone-mode link; the owning thread sends via link_flush_dtmf_phone. */
 	RPT_LIST_TRAVERSE(myrpt->links, l, l_it) {
 		if (!l->phonemode) {
 			continue;
@@ -304,11 +314,34 @@ void do_dtmf_phone(struct rpt *myrpt, struct rpt_link *mylink, char c)
 		if (mylink && (l == mylink)) {
 			continue;
 		}
-		if (l->chan) {
-			ast_senddigit(l->chan, c, 0);
+		ao2_lock(l);
+		if (l->chan && l->dtmf_phone_q_len < sizeof(l->dtmf_phone_q)) {
+			l->dtmf_phone_q[l->dtmf_phone_q_len++] = c;
 		}
+		ao2_unlock(l);
 	}
 	ao2_iterator_destroy(&l_it);
+}
+
+void link_flush_dtmf_phone(struct rpt_link *l)
+{
+	for (;;) {
+		char c;
+		struct ast_channel *chan;
+
+		ao2_lock(l);
+		if (!l->dtmf_phone_q_len || !l->chan) {
+			ao2_unlock(l);
+			return;
+		}
+		c = l->dtmf_phone_q[0];
+		l->dtmf_phone_q_len--;
+		memmove(l->dtmf_phone_q, l->dtmf_phone_q + 1, l->dtmf_phone_q_len);
+		chan = ast_channel_ref(l->chan);
+		ao2_unlock(l);
+		ast_senddigit(chan, c, 0);
+		ast_channel_unref(chan);
+	}
 }
 
 void rssi_send(struct rpt *myrpt)
@@ -418,8 +451,8 @@ void send_link_keyquery(struct rpt *myrpt)
 		return;
 	}
 
-	rpt_mutex_unlock(&myrpt->lock);
 	ao2_callback(myrpt->links, OBJ_MULTIPLE | OBJ_NODATA, link_qwrite_cb, &wf);
+	rpt_mutex_unlock(&myrpt->lock);
 }
 
 void rpt_link_add(struct ao2_container *links, struct rpt_link *l)

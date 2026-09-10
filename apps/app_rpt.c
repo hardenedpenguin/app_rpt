@@ -2556,9 +2556,11 @@ static void *attempt_reconnect(struct rpt *myrpt, struct rpt_link *l)
 	l->link_newkey = RADIO_KEY_NOT_ALLOWED;
 	l->chan = ast_request(deststr, cap, NULL, NULL, tele, NULL);
 	ao2_ref(cap, -1);
+	ao2_lock(l);
 	while ((f1 = AST_LIST_REMOVE_HEAD(&l->textq, frame_list))) {
 		ast_frfree(f1);
 	}
+	ao2_unlock(l);
 	if (l->chan) {
 		if (rpt_make_call(l->chan, tele, 999, deststr, "Remote Rx", "attempt_reconnect", myrpt->name, l->name)) {
 			ast_log(LOG_WARNING, "Unable to place call to %s/%s\n", deststr, tele);
@@ -3411,17 +3413,22 @@ static inline void link_process_textq(struct rpt *myrpt, struct rpt_link *l)
 {
 	struct ast_frame *f;
 
-	rpt_mutex_lock(&myrpt->lock);
-	while (l->chan && l->thisconnected && !AST_LIST_EMPTY(&l->textq)) {
-		struct ast_channel *chan = ast_channel_ref(l->chan);
+	(void) myrpt;
+	for (;;) {
+		struct ast_channel *chan;
+
+		ao2_lock(l);
+		if (!l->chan || !l->thisconnected || AST_LIST_EMPTY(&l->textq)) {
+			ao2_unlock(l);
+			break;
+		}
+		chan = ast_channel_ref(l->chan);
 		f = AST_LIST_REMOVE_HEAD(&l->textq, frame_list);
-		rpt_mutex_unlock(&myrpt->lock);
+		ao2_unlock(l);
 		ast_write(chan, f);
-		rpt_mutex_lock(&myrpt->lock);
 		ast_frfree(f);
 		ast_channel_unref(chan);
 	}
-	rpt_mutex_unlock(&myrpt->lock);
 }
 
 /*!
@@ -4764,6 +4771,7 @@ void process_link_channel(struct rpt *myrpt, struct rpt_link *l)
 		if (periodic_process_link(myrpt, l, rpt_time_elapsed(&looptimestart))) {
 			break;
 		}
+		link_flush_dtmf_phone(l);
 		/*
 		 * After demote/disced, flush any remaining textq (incl. !!DISCONNECT!!)
 		 * on a live channel, wait briefly for TX, then softhangup (#1236).

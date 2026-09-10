@@ -616,7 +616,11 @@ struct rpt_link {
 	time_t lastkeytime;
 	time_t lastunkeytime;
 	AST_LIST_HEAD_NOLOCK(, ast_frame) rxq;
+	/*! \brief Outbound TEXT frames; access only under ao2_lock(link) */
 	AST_LIST_HEAD_NOLOCK(, ast_frame) textq;
+	/*! \brief Phone-mode DTMF to send from the link thread (not cross-thread) */
+	char dtmf_phone_q[MAXDTMF];
+	unsigned char dtmf_phone_q_len;
 };
 
 /*!

@@ -27,6 +27,10 @@ void tele_link_remove(struct rpt *myrpt, struct rpt_tele *t);
 
 int altlink1(struct rpt *myrpt, struct rpt_link *mylink);
 
+/*!
+ * \brief Queue a TEXT frame on the link textq for the owning link thread to send.
+ * \note Safe from any thread; textq is protected by ao2_lock(l).
+ */
 void rpt_qwrite(struct rpt_link *l, struct ast_frame *f);
 
 /*!
@@ -54,7 +58,18 @@ int linkcount(struct rpt *myrpt);
 /*! \brief Considers repeater received RSSI and all voter link RSSI information and set values in myrpt structure. */
 void FindBestRssi(struct rpt *myrpt);
 
+/*!
+ * \brief Queue a DTMF digit for phone-mode links (flushed by the link thread).
+ * \param myrpt Repeater
+ * \param mylink Link to skip (source), or NULL
+ * \param c Digit to queue
+ */
 void do_dtmf_phone(struct rpt *myrpt, struct rpt_link *mylink, char c);
+
+/*!
+ * \brief Send any queued phone-mode DTMF digits on this link (link thread only).
+ */
+void link_flush_dtmf_phone(struct rpt_link *l);
 
 /*! \brief Send rx rssi out on all links. */
 void rssi_send(struct rpt *myrpt);
