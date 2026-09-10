@@ -1914,8 +1914,7 @@ static void handle_link_data(struct rpt *myrpt, struct rpt_link *mylink, char *s
 
 	if (!strcmp(str, DISCSTR)) {
 		/* Peer asked us to drop this link; demote permalinks so #574 infinite
-		 * retry cannot resurrect it. stop_retries softhangups so teardown
-		 * runs through remote_hangup_helper (textq flush).
+		 * retry cannot resurrect it. Link thread softhangups after textq flush (#1236).
 		 */
 		rpt_link_stop_retries(mylink);
 		return;
@@ -3646,6 +3645,17 @@ static inline int periodic_process_link(struct rpt *myrpt, struct rpt_link *l, c
 		}
 
 		/*
+		 * Channel already gone and disconnect was requested (demote during reconnect
+		 * wait, unsupported-type stop_retries, etc.): finish so the link thread exits
+		 * and tears down pchan — do not leave the link stranded without l->chan.
+		 */
+		if (!l->chan && l->disced != RPT_LINK_DISCONNECT_NONE) {
+			if (!strcmp(myrpt->cmdnode, l->name)) {
+				myrpt->cmdnode[0] = 0;
+			}
+			return -1;
+		}
+		/*
 		 * Reconnect only while the channel is down. Count attempts here — not on every
 		 * tick while connected (that exhausted MAX_RETRIES within ~100ms after ANSWER).
 		 * Permanent links keep trying unless rpt_link_stop_retries() demoted them.
@@ -4732,9 +4742,10 @@ void process_link_channel(struct rpt *myrpt, struct rpt_link *l)
 	looptimestart = rpt_tvnow();
 
 	/*
-	 * Do not exit on disced or !chan. softhangup must reach remote_hangup_helper.
-	 * Unexpected inbound loss keeps ticking until disctime expires (LINKDISC AA);
-	 * intentional inbound DISCSTR finishes immediately in remote_hangup_helper.
+	 * Do not exit on disced or !chan alone.
+	 * Intentional disconnect: periodic flushes textq, then we softhangup so
+	 * !!DISCONNECT!! goes out before hangup (#1236). Unexpected inbound loss
+	 * keeps ticking until disctime expires (LINKDISC AA).
 	 * periodic_process_link returns -1 when that timeout/give-up path finishes.
 	 */
 	while (ms >= 0) {
@@ -4752,6 +4763,23 @@ void process_link_channel(struct rpt *myrpt, struct rpt_link *l)
 		who = ast_waitfor_n(cs, n, &ms);
 		if (periodic_process_link(myrpt, l, rpt_time_elapsed(&looptimestart))) {
 			break;
+		}
+		/*
+		 * After demote/disced, flush any remaining textq (incl. !!DISCONNECT!!)
+		 * on a live channel, wait briefly for TX, then softhangup (#1236).
+		 */
+		if (l->disced != RPT_LINK_DISCONNECT_NONE && l->chan && !ast_check_hangup(l->chan)) {
+			if (l->pchan) {
+				ast_autoservice_start(l->pchan);
+			}
+			link_process_textq(myrpt, l);
+			ast_safe_sleep(l->chan, MSWAIT * 10);
+			if (l->pchan) {
+				ast_autoservice_stop(l->pchan);
+			}
+			if (l->chan) {
+				ast_softhangup(l->chan, AST_SOFTHANGUP_DEV);
+			}
 		}
 		if (!ms) {
 			/* No channels had activity before the timer expired,
