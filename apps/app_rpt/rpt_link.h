@@ -36,9 +36,7 @@ void rpt_qwrite(struct rpt_link *l, struct ast_frame *f);
  *
  * Demotes permanent links off MAX_RETRIES_PERM, marks retries exhausted,
  * clears perma, and sets disced. Does not softhangup and does not arm disctime.
- * The receiver of !!DISCONNECT!! uses this alone so it can close promptly.
- * A locally initiated disconnect must also call rpt_link_arm_disconnect_grace()
- * so the link thread waits for the peer before force-hangup (#1236 / #1218).
+ * The link thread flushes textq (if any) then softhangups (#1236).
  *
  * \note Locking: does not take myrpt->lock and does not touch the channel, so it
  * is safe with or without myrpt->lock held. Do not call while holding a channel lock.
@@ -47,13 +45,6 @@ void rpt_link_stop_retries_common(struct rpt_link *l, enum rpt_link_disconnect d
 
 #define rpt_link_stop_retries(l) rpt_link_stop_retries_common((l), RPT_LINK_DISCONNECT)
 #define rpt_link_stop_retries_silent(l) rpt_link_stop_retries_common((l), RPT_LINK_DISCONNECT_SILENT)
-
-/*!
- * \brief Arm inbound-style disctime so a local disconnect can wait for the peer.
- * \param l Link already marked RPT_LINK_DISCONNECT
- * \note Does not arm if disctime is already running. Do not call for a received DISCSTR.
- */
-void rpt_link_arm_disconnect_grace(struct rpt_link *l);
 
 /*!
  * \brief Queue !!DISCONNECT!! on the link textq for the link thread to flush.

@@ -1913,9 +1913,8 @@ static void handle_link_data(struct rpt *myrpt, struct rpt_link *mylink, char *s
 	ast_debug(5, "Received text over link: '%s'\n", str);
 
 	if (!strcmp(str, DISCSTR)) {
-		/* Peer asked us to drop this link. Demote permalinks, but do not arm
-		 * disctime — the receiver must close promptly so a peer that is waiting
-		 * its own grace window is not stuck until both timers expire (#1236).
+		/* Peer asked us to drop this link; demote permalinks so #574 infinite
+		 * retry cannot resurrect it. Link thread softhangups after textq flush (#1236).
 		 */
 		rpt_link_stop_retries(mylink);
 		return;
@@ -3427,7 +3426,7 @@ static inline void link_process_textq(struct rpt *myrpt, struct rpt_link *l)
 
 /*!
  * \brief Finish an inbound link after chan is gone (LINKDISC AA side effects).
- * Used after disctime expires (unexpected loss or intentional disconnect grace).
+ * Used after disctime expires, or immediately on intentional inbound DISCSTR.
  */
 static void inbound_link_finished(struct rpt *myrpt, struct rpt_link *l)
 {
@@ -3621,16 +3620,6 @@ static inline int periodic_process_link(struct rpt *myrpt, struct rpt_link *l, c
 
 	update_timer(&l->retrytimer, elap, 0);
 
-	/*
-	 * Force hangup when disced is set and disctime is not running:
-	 * - received !!DISCONNECT!! never arms grace, so this closes promptly;
-	 * - a local initiator only reaches here after the armed grace expires.
-	 */
-	if (l->disced == RPT_LINK_DISCONNECT && !l->disctime && l->chan && !ast_check_hangup(l->chan)) {
-		ast_debug(1, "disconnect on %s: hanging up (grace not running)\n", l->name);
-		ast_softhangup(l->chan, AST_SOFTHANGUP_DEV);
-	}
-
 	/* start tracking connect time */
 	if (ast_tvzero(l->connecttime)) {
 		l->connecttime = rpt_tvnow();
@@ -3656,23 +3645,12 @@ static inline int periodic_process_link(struct rpt *myrpt, struct rpt_link *l, c
 		}
 
 		/*
-		 * Intentional disconnect with channel already gone: wait out disctime so
-		 * LINKDISC AA / telem still run on expiry (#1218). Then finish.
+		 * Intentional disconnect and channel already gone: finish so the link
+		 * thread exits and tears down pchan (no disctime wait on local disconnect).
 		 */
 		if (!l->chan && l->disced != RPT_LINK_DISCONNECT_NONE) {
-			if (l->disctime) {
-				return 0;
-			}
 			if (!strcmp(myrpt->cmdnode, l->name)) {
 				myrpt->cmdnode[0] = 0;
-			}
-			if (l->disced == RPT_LINK_DISCONNECT && l->hasconnected) {
-				if (l->name[0] != '0') {
-					rpt_telemetry(myrpt, REMDISC, l);
-				}
-				rpt_update_links(myrpt);
-				dodispgm(myrpt, l->name);
-				donodelog_fmt(myrpt, "LINKDISC,%s", l->name);
 			}
 			return -1;
 		}
@@ -4681,56 +4659,33 @@ static int remote_hangup_helper(struct rpt *myrpt, struct rpt_link *l)
 		rpt_update_links(myrpt);
 	}
 
-	if (!l->chan) {
-		/*
-		 * Intentional disconnect: peer already gone — keep the link thread alive on
-		 * pchan until disctime expires so LINKDISC AA still runs (#1218).
-		 */
-		if (l->disced == RPT_LINK_DISCONNECT && l->disctime) {
-			return 1;
-		}
-		return 0;
-	}
-	if (CHAN_TECH(l->chan, "echolink") || CHAN_TECH(l->chan, "tlb") || ast_shutting_down()) {
+	if (!l->chan || CHAN_TECH(l->chan, "echolink") || CHAN_TECH(l->chan, "tlb") || ast_shutting_down()) {
 		return 0;
 	}
 
 	/*
-	 * Inbound unexpected loss parks on disctime. A local initiator that already
-	 * armed grace keeps that timer (do not start a second one). Received DISCSTR
-	 * or a grace timer that already expired must not be rearmed.
+	 * Unexpected inbound loss parks on disctime so periodic LINKDISC AA can run.
+	 * Intentional inbound DISCSTR (disced already set) finishes immediately.
 	 */
 	if (!l->outbound) {
-		if (l->disced == RPT_LINK_DISCONNECT && l->disctime) {
-			hangup_link_chan(l);
-			return 1;
-		}
-		if (l->disced != RPT_LINK_DISCONNECT_NONE && !l->disctime) {
+		if (l->disced != RPT_LINK_DISCONNECT_NONE) {
 			hangup_link_chan(l);
 			inbound_link_finished(myrpt, l);
 			return 0;
 		}
-		if (!l->disctime) {
-			if ((l->name[0] <= '0') || (l->name[0] > '9') || l->isremote) {
-				l->disctime = 1;
-			} else {
-				l->disctime = DISC_TIME;
-			}
+		if ((l->name[0] <= '0') || (l->name[0] > '9') || l->isremote) {
+			/* Not an allstar link node */
+			l->disctime = 1;
+		} else {
+			/* An allstar link node */
+			l->disctime = DISC_TIME;
 		}
 		hangup_link_chan(l);
 		return 1;
 	}
 
-	/* Local outbound disconnect: do not redial; wait out armed grace. */
-	if (l->disced == RPT_LINK_DISCONNECT && l->disctime) {
-		hangup_link_chan(l);
-		return 1;
-	}
-	if (l->disced == RPT_LINK_DISCONNECT) {
-		hangup_link_chan(l);
-		return 0;
-	}
-	if (l->disced == RPT_LINK_DISCONNECT_SILENT) {
+	/* Intentional outbound disconnect: do not redial. */
+	if (l->disced != RPT_LINK_DISCONNECT_NONE) {
 		hangup_link_chan(l);
 		return 0;
 	}
@@ -4787,10 +4742,9 @@ void process_link_channel(struct rpt *myrpt, struct rpt_link *l)
 
 	/*
 	 * Do not exit on disced or !chan alone.
-	 * Intentional DISCONNECT: textq flush (periodic) sends !!DISCONNECT!!, then we
-	 * wait for the peer during disctime and force softhangup only if still up (#1218).
-	 * SILENT: softhangup promptly (no DISCSTR / no grace wait).
-	 * Unexpected inbound loss parks on disctime until LINKDISC AA.
+	 * Intentional disconnect: flush textq (incl. !!DISCONNECT!!) on a live channel,
+	 * wait briefly for TX, then softhangup (#1236). Unexpected inbound loss parks
+	 * on disctime until LINKDISC AA. disctime is not used for local disconnect.
 	 * periodic_process_link returns -1 when that timeout/give-up path finishes.
 	 */
 	while (ms >= 0) {
@@ -4809,9 +4763,22 @@ void process_link_channel(struct rpt *myrpt, struct rpt_link *l)
 		if (periodic_process_link(myrpt, l, rpt_time_elapsed(&looptimestart))) {
 			break;
 		}
-		/* Silent teardown: no DISCSTR grace period — hang up now. */
-		if (l->disced == RPT_LINK_DISCONNECT_SILENT && l->chan && !ast_check_hangup(l->chan)) {
-			ast_softhangup(l->chan, AST_SOFTHANGUP_DEV);
+		/*
+		 * After demote/disced, flush any remaining textq (incl. !!DISCONNECT!!)
+		 * on a live channel, wait briefly for TX, then softhangup (#1236).
+		 */
+		if (l->disced != RPT_LINK_DISCONNECT_NONE && l->chan && !ast_check_hangup(l->chan)) {
+			if (l->pchan) {
+				ast_autoservice_start(l->pchan);
+			}
+			link_process_textq(myrpt, l);
+			ast_safe_sleep(l->chan, MSWAIT * 10);
+			if (l->pchan) {
+				ast_autoservice_stop(l->pchan);
+			}
+			if (l->chan) {
+				ast_softhangup(l->chan, AST_SOFTHANGUP_DEV);
+			}
 		}
 		if (!ms) {
 			/* No channels had activity before the timer expired,

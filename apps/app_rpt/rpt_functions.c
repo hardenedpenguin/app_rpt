@@ -183,15 +183,14 @@ enum rpt_function_response function_ilink(struct rpt *myrpt, char *param, char *
 		}
 		ast_copy_string(myrpt->lastlinknode, digitbuf, sizeof(myrpt->lastlinknode));
 		/*
-		 * Local initiator only: queue !!DISCONNECT!!, demote, and arm disctime.
-		 * The link thread flushes textq, waits for the peer, and force-hangs up
-		 * only after expiry. A received DISCSTR does not arm grace (#1236 / #1218).
+		 * Queue !!DISCONNECT!! for the link thread, then demote/disced.
+		 * The link thread flushes textq before softhangup (#1236).
+		 * disctime is not used here — it is only for unexpected inbound loss.
 		 */
 		if (l->chan && l->thisconnected) {
 			rpt_link_queue_disconnect(l);
 		}
 		rpt_link_stop_retries(l);
-		rpt_link_arm_disconnect_grace(l);
 		myrpt->linkactivityflag = 1;
 		rpt_mutex_unlock(&myrpt->lock);
 		rpt_telem_select(myrpt, command_source, mylink);
