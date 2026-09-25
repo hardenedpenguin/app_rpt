@@ -4713,7 +4713,7 @@ static int unload_module(void)
 		simpleusb_release_device(o);
 		ast_mutex_destroy(&o->echolock);
 		ast_mutex_destroy(&o->eepromlock);
-		ast_mutex_destroy(&o->txqlock);
+		ast_mutex_destroy(&o->txq.lock);
 		ast_mutex_destroy(&o->usblock);
 		ast_mutex_destroy(&o->device_lock);
 		ast_mutex_destroy(&o->swap_lock);
@@ -4736,7 +4736,7 @@ static int unload_module(void)
 	}
 	ast_mutex_destroy(&simpleusb_default.echolock);
 	ast_mutex_destroy(&simpleusb_default.eepromlock);
-	ast_mutex_destroy(&simpleusb_default.txqlock);
+	ast_mutex_destroy(&simpleusb_default.txq.lock);
 	ast_mutex_destroy(&simpleusb_default.usblock);
 	ast_mutex_destroy(&simpleusb_default.device_lock);
 	ast_mutex_destroy(&simpleusb_default.swap_lock);
