@@ -4567,6 +4567,10 @@ static int unload_module(void)
 		no = o->next; /* Keep track of next object after free */
 		if (o->owner) {
 			ast_softhangup(o->owner, AST_SOFTHANGUP_APPUNLOAD);
+			/* Hangup clears owner after write and hangup have left the device locks. */
+			while (o->owner) {
+				usleep(10000);
+			}
 		}
 		o->stopaudiothread = 1;
 		o->stophidthread = 1;
