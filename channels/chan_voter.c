@@ -284,7 +284,7 @@ static char context[AST_MAX_EXTENSION] = "default";
 
 /* Timeout definitions in ms */
 #define RX_TIMEOUT_MS 200
-#define CLIENT_TIMEOUT_MS 3000
+#define CLIENT_TIMEOUT_MS 3500
 #define MASTER_TIMEOUT_MS 100
 #define TX_KEEPALIVE_MS 1000
 #define PING_TIME_MS 250
@@ -3301,7 +3301,7 @@ static int voter_mix_and_send(struct voter_pvt *p, struct voter_client *maxclien
 static void *voter_xmit(void *data)
 {
 	struct voter_pvt *p = (struct voter_pvt *) data;
-	int i, txqueue, txact, mixminus_act;
+	int i, txqueue, txact, mixminus_act, mixminus_source;
 	int send_ping, send_keepalive;
 	i16 dummybuf1[FRAME_SIZE * 12], xmtbuf1[FRAME_SIZE * 12];
 	i16 xmtbuf[FRAME_SIZE], dummybuf2[FRAME_SIZE], xmtbuf2[FRAME_SIZE];
@@ -3591,12 +3591,31 @@ static void *voter_xmit(void *data)
 					if (client->doadpcm) {
 						continue;
 					}
+					/* The final send below is restricted to clients with totransmit set
+					 * and txlockout clear. Check those same destination conditions BEFORE
+					 * constructing mixminus audio, since building it traverses the client
+					 * list and performs FRAME_SIZE sample operations while voter_lock is
+					 * held.
+					 *
+					 * This does not exclude this client as a mixminus SOURCE, it only
+					 * excludes it as a DESTINATION.
+					 *
+					 * There is no point in building an audio packet that we're just going
+					 * to throw away...
+					 */
+					if (!client->totransmit || client->txlockout) {
+						continue;
+					}
 					/* If mixminus is configured for this channel, figure out which
 					 * clients need audio sent to them (the "minus" client won't get
 					 * audio).
 					 */
 					if (p->mixminus) {
 						memcpy(xmtbuf2, xmtbuf, sizeof(xmtbuf2));
+						/* mixminus_source is a flag to indicate we have found a mixminus
+						 * audio SOURCE that we need to process.
+						 */
+						mixminus_source = 0;
 						i = 0;
 						/* Traverse the client list. */
 						for (client1 = clients; client1; client1 = client1->next) {
@@ -3634,6 +3653,10 @@ static void *voter_xmit(void *data)
 							if (!client1->lastrssi) {
 								continue;
 							}
+							/* At this point, we have identified a valid mixminus source,
+							 * so set our flag.
+							 */
+							mixminus_source = 1;
 							/* Build the mixed audio for the client. xmtbuf2 initially
 							 * contains the current transmit audio. client1->lastaudio
 							 * contains the last audio frame received from another mix-
@@ -3657,8 +3680,11 @@ static void *voter_xmit(void *data)
 								xmtbuf2[i] = mixaudio;
 							}
 						}
-						/*! \todo VE7FET AI flagged this, see Issue #1215 */
-						if (!txact && !i) {
+						/* Send if there is transmit activity or a mixminus source.
+						 *
+						 * Bail out if txact = 0 and mixminus_source = 0
+						 */
+						if (!txact && !mixminus_source) {
 							continue;
 						}
 
@@ -6236,18 +6262,36 @@ static void *voter_reader(void *data)
 							ast_frfree(f1);
 						}
 					} else if (client->mix) {
-						/* Presumably, the only way to get here is to be a mix mode client AND index < 0
-						 * because buflen < 160 in voter.conf.
-						 * We should never get here now, because when a client sends us flags to indicate it is a
-						 * mix mode client, we check the buflen then block the client from connecting, after throwing
-						 * an error to fix the config file.
-						 */
-						client->rxseqno = 0;
-						client->rxseqno_40ms = 0;
-						client->rxseq40ms = 0;
-						client->drain40ms = 0;
-						ast_log(LOG_ERROR, "VOTER %u: Client %s out of bounds! Please file a bug report with the developers if you see this message!\n",
-							client->nodenum, client->name);
+						if (index <= 0) {
+							/* Mix clients can use the vtime_nsec field as a packet sequence number rather than
+							 * as GPS nanoseconds. The server advances rxseqno on each 20ms timing cycle,
+							 * independently of when UDP packets arrive.
+							 *
+							 * Consequently, a packet delayed sufficiently long, or an older packet delivered
+							 * after a newer packet, can have a sequence number behind rxseqno. Once the packet
+							 * is more than the available receive-buffer margin behind the current sequence, the
+							 * calculated index is <= 0.
+							 *
+							 * This packet is too old to insert safely into the portion of the ring buffer that
+							 * has not yet been consumed. We don't want to wrap the index around the ring buffer,
+							 * because that would place stale audio into a future playback position.
+							 *
+							 * So, discard the stale packet and re-establish the sequence reference from a subsequent
+							 * packet.
+							 */
+							client->rxseqno = 0;
+							client->rxseqno_40ms = 0;
+							client->rxseq40ms = 0;
+							client->drain40ms = 0;
+							ast_debug(3, "VOTER %u: Mix client %s packet sequence is too old (index %d); resynchronizing receive sequence\n",
+								client->nodenum, client->name, index);
+						} else {
+							/* A positive index beyond the upper ring-buffer safety boundary is not explained by an
+							 * ordinary late packet. Throw an error for this unexpected case.
+							 */
+							ast_log(LOG_ERROR, "VOTER %u: Client %s out of bounds! Please file a bug report with the developers if you see this message!\n",
+								client->nodenum, client->name);
+						}
 					}
 					if (client->curmaster) {
 						hasmastered = 0;
